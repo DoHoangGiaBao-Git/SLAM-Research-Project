@@ -18,7 +18,6 @@ def generate_launch_description():
 
     # Launch Configurations
     mode_cfg = LaunchConfiguration('mode')
-    rviz_cfg = LaunchConfiguration('rviz_config')
     
     # Automatically set use_sim_time to true if mode is 'sim', otherwise false
     use_sim_time_cfg = PythonExpression(["'true' if '", mode_cfg, "' == 'sim' else 'false'"])
