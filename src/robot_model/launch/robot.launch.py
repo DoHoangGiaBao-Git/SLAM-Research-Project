@@ -64,9 +64,41 @@ def generate_launch_description():
             }],
         ),
 
+        Node(
+            package='joint_state_publisher',
+            executable='joint_state_publisher',
+            name='joint_state_publisher',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time_cfg}],
+        ),
+
+        Node(
+            package='ekf_slam',
+            executable='odometry',
+            name='odometry',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time_cfg}],
+        ),
+
+        Node(
+            package='ekf_slam',
+            executable='landmark_extraction',
+            name='landmark_extraction',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time_cfg}],
+        ),
+
+        Node(
+            package='ekf_slam',
+            executable='ekf_slam',
+            name='ekf_slam',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time_cfg}],
+        ),
+
         # --- RVIZ ---
         TimerAction(
-            period=5.0,  # đợi 4 giây cho robot_state_publisher publish
+            period=5.0,  # Wait for robot_state_publisher to publish
             actions=[
             Node(
                 package='rviz2',
