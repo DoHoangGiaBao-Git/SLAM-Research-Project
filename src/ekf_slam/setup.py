@@ -26,7 +26,8 @@ setup(
         'console_scripts': [
             'odometry = ekf_slam.odometry:main',
             'landmark_extraction = ekf_slam.landmark_extraction:main',
-            'ekf_slam = ekf_slam.ekf_slam:main'
+            'ekf_slam = ekf_slam.ekf_slam:main',
+            'grid_map = ekf_slam.grid_map:main'
         ],
     },
 )

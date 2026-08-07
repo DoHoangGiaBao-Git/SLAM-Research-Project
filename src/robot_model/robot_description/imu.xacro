@@ -16,7 +16,7 @@
       <update_rate>100</update_rate>
       <always_on>true</always_on>
       <gz_frame_id>imu_link</gz_frame_id> <!-- `frame_id` in non-fortress -->
-      <topic>/robot1/imu/data</topic>
+      <topic>/imu</topic>
       <imu>
         <orientation_reference_frame>
           <localization>ENU</localization>

@@ -27,7 +27,7 @@
         
   <gazebo reference="robot1_laser">
     <sensor name="laser" type="gpu_lidar">
-      <topic>/robot1/scan</topic>
+      <topic>/scan</topic>
       <frame>robot1_laser</frame>
       <update_rate>10</update_rate>
       <gz_frame_id>robot1_laser</gz_frame_id>

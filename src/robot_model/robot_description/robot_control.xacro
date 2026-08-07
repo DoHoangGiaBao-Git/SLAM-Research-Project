@@ -21,7 +21,7 @@
       <wheel_radius>0.0325</wheel_radius>
       
       <!-- Topic -->
-      <topic>/robot1/cmd_vel</topic>
+      <topic>/cmd_vel</topic>
       
       <!-- Frame -->
       <frame_id>odom</frame_id>

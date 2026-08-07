@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, Imu
 from geometry_msgs.msg import TransformStamped
 import tf2_ros
 import math
@@ -14,53 +14,92 @@ class OdometryNode(Node):
         # Wheel parameters
         self.R = 0.0325 # Wheel Radius in meters
         self.L = 0.175 # Distance between wheels in meters
+        self.alpha = 0.95 # Complementary filter alpha
 
         # Robot pose state
         self.x = 0.0
         self.y = 0.0
         self.theta = 0.0
 
+        self.imu_omega = 0.0
+        self.omega = 0.0
+
         self.last_time = self.get_clock().now() # Last time stamp for odometry calculation
 
         # Subscriptions and publishers
         self.joint_sub = self.create_subscription( # JointState data subscription
             JointState,
-            '/joint_states_raw',
+            '/joint_states',
             self.joint_callback,
+            10
+        )
+
+        self.imu_sub = self.create_subscription(
+            Imu,
+            '/imu',
+            self.imu_callback,
             10
         )
 
         self.odom_pub = self.create_publisher( # Odometry data publisher
             Odometry,
-            'robot1/odom',
+            '/odom',
             10
         )
 
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self) # TF broadcaster
         self.get_logger().info("Odometry initialized.")
 
-    def joint_callback(self, msg):
-        v_r = msg.velocity[0] * self.R # Right wheel velocity
-        v_l = msg.velocity[1] * self.R # Left wheel velocity
+    def imu_callback(self, msg: Imu):
+        self.imu_omega = msg.angular_velocity.z
 
-        # Calculate linear and angular velocity
-        v = (v_r + v_l) / 2.0 # Linear velocity
-        omega = (v_r - v_l) / self.L # Angular velocity
+    def joint_callback(self, msg: JointState):
+        # Guard against empty velocity arrays
+        if not msg.velocity or len(msg.velocity) < 2:
+            return
 
-        # Time difference
+        # Attempt dynamic index lookup by joint name (handles TurtleBot4 / Create3 joint names)
+        left_idx, right_idx = None, None
+        for i, name in enumerate(msg.name):
+            if 'left' in name and 'wheel' in name:
+                left_idx = i
+            elif 'right' in name and 'wheel' in name:
+                right_idx = i
+
+        # Retrieve velocities using matched joint indices or fallback to first two array elements
+        try:
+            if left_idx is not None and right_idx is not None:
+                v_l = msg.velocity[left_idx] * self.R
+                v_r = msg.velocity[right_idx] * self.R
+            else:
+                v_l = msg.velocity[0] * self.R
+                v_r = msg.velocity[1] * self.R
+        except IndexError:
+            return
+
+        v = (v_r + v_l) / 2.0 
+        encoder_omega = (v_r - v_l) / self.L 
+    
         current_time = self.get_clock().now()
-        dt = (current_time - self.last_time).nanoseconds / 1e9 # Time difference in seconds
+        dt = (current_time - self.last_time).nanoseconds / 1e9 
         self.last_time = current_time
 
-        # Update robot pose using differential drive kinematics
+        if dt <= 0:
+            return
+
+        theta_imu = self.theta + self.imu_omega * dt
+        theta_encoder = self.theta + encoder_omega * dt
+
+        self.theta = self.alpha * theta_imu + (1 - self.alpha) * theta_encoder
+        self.omega = self.alpha * self.imu_omega + (1 - self.alpha) * encoder_omega
+        
         self.x += v * dt * math.cos(self.theta)
         self.y += v * dt * math.sin(self.theta)
-        self.theta += omega * dt
-        self.theta = math.atan2(math.sin(self.theta), math.cos(self.theta)) # Keep theta within [-pi, pi]
+        self.theta += self.omega * dt
+        self.theta = math.atan2(math.sin(self.theta), math.cos(self.theta)) 
 
-        self.publish_odom_msg(v, omega) # Publish odometry message
-
-        self.publish_tf() # Publish transform for TF (odom -> base_link)
+        self.publish_odom_msg(v, self.omega) 
+        self.publish_tf()
 
     def publish_odom_msg(self, v, omega):
         odom = Odometry()

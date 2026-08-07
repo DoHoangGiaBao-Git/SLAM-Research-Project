@@ -96,6 +96,14 @@ def generate_launch_description():
             parameters=[{'use_sim_time': use_sim_time_cfg}],
         ),
 
+        Node(
+            package='ekf_slam',
+            executable='grid_map',
+            name='grid_map',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time_cfg}],
+        ),
+
         # --- RVIZ ---
         TimerAction(
             period=5.0,  # Wait for robot_state_publisher to publish
@@ -151,18 +159,17 @@ def generate_launch_description():
                     executable='parameter_bridge',
                     arguments=[
                         '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-                        '/robot1/imu/data@sensor_msgs/msg/Imu@gz.msgs.IMU',
-                        '/robot1/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
-                        '/robot1/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
+                        '/imu@sensor_msgs/msg/Imu@gz.msgs.IMU',
+                        '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
+                        '/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
                         '/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
                         '/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
-                        '/robot1/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
-                        f'/world/simple_room/model/my_robot/joint_state@sensor_msgs/msg/JointState@gz.msgs.Model'
+                        '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
+                        f'/world/simple_room/model/my_robot/joint_state@sensor_msgs/msg/JointState[gz.msgs.Model'
                     ],
                     output='screen',
                     remappings=[
-                        (f'/world/simple_room/model/my_robot/joint_state', '/joint_states_raw'),
-                        ('/imu', '/robot1/imu/data'),
+                        (f'/world/simple_room/model/my_robot/joint_state', '/joint_states'),
                     ]
                 )
             ]
