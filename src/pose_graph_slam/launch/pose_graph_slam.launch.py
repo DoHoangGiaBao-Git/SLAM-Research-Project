@@ -1,0 +1,75 @@
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    # Package name
+    package_name = 'pose_graph_slam'
+
+    pkg_share = get_package_share_directory(package_name)
+    rviz_config_path = os.path.join(pkg_share, 'rviz2', 'config.rviz')
+
+    # Argument to toggle between Simulation and Real Robot
+    use_sim_arg = DeclareLaunchArgument(
+        'use_sim',
+        default_value='true',
+        description='Set to "true" for Gazebo simulation, or "false" for real robot.'
+    )
+    use_sim = LaunchConfiguration('use_sim')
+
+    # Gazebo simulation bring up
+    gz_bringup_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('turtlebot4_gz_bringup'),
+                'launch',
+                'turtlebot4_gz.launch.py'
+            )
+        ),
+        condition=IfCondition(use_sim)
+    )
+
+    # Set use_sim_time for all nodes
+    node_params = [{'use_sim_time': use_sim}]
+
+    # Run Pose Graph SLAM
+    pose_graph_slam_node = Node(
+        package=package_name,
+        executable='pose_graph_slam_node',
+        name='pose_graph_slam_node',
+        output='screen',
+        parameters=node_params,
+    )
+
+    # Occupancy Grid Map
+    occupancy_grid_map_node = Node(
+        package=package_name,
+        executable='occupancy_grid_map_node',
+        name='occupancy_grid_map_node',
+        output='screen',
+        parameters=node_params,
+    )
+
+    # RViz2 Node
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config_path],
+        output='screen',
+        parameters=node_params,
+    )
+
+    return LaunchDescription([
+        use_sim_arg,
+        gz_bringup_launch,
+        pose_graph_slam_node,
+        occupancy_grid_map_node,
+        rviz_node,
+    ])
