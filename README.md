@@ -5,7 +5,7 @@ Repository For SLAM Research
 From the workspace root, run the keyboard teleop command below to pubish velocity command using keyboard (turtlebot4 can be controlled with a controller so this command is not necessary when running turtlebot4):
 
 ```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p stamped:=true
 ```
 ## Initialize turtlebot4
 ### EKF-SLAM
