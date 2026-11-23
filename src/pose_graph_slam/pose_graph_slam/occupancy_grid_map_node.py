@@ -21,17 +21,15 @@ class OccupancyGridNode(Node):
         self.origin_x = -self.width_m / 2.0
         self.origin_y = -self.height_m / 2.0
 
-        # Log-odds parameters
+        # Log-odds parameters (FIX: Higher l_occ and lower l_free prevent map fading)
         self.l0 = 0.0
-        self.l_occ = 1.0     
-        self.l_free = -0.15  
-        self.l_min, self.l_max = -6.0, 6.0  
+        self.l_occ = 2.0       # Stronger weight for obstacle hits
+        self.l_free = -0.05    # Gentle weight for free space
+        self.l_min, self.l_max = -4.0, 8.0  
 
         self.log_odds = np.zeros((self.height_cells, self.width_cells), dtype=np.float32)
 
         # Storage for keyframe scans: [(x_base, y_base, is_hit), ...]
-        # Populated 1:1, in order, from /keyframe_scan - no guessing which
-        # scan belongs to which pose-graph node.
         self.keyframes = []
 
         # === Topics ===
@@ -39,7 +37,10 @@ class OccupancyGridNode(Node):
         self.create_subscription(PoseArray, '/pose_graph_nodes', self.pose_graph_callback, 10)
         self.map_pub = self.create_publisher(OccupancyGrid, '/occupancy_grid', 10)
 
-        self.get_logger().info('Occupancy Grid Node active with Keyframe Re-projection.')
+        # Periodic publish timer
+        self.create_timer(0.5, self.publish_map)
+
+        self.get_logger().info('Occupancy Grid Node active with persistent map updates.')
 
     def world_to_grid(self, x, y):
         gx = int((x - self.origin_x) / self.resolution)
@@ -68,47 +69,47 @@ class OccupancyGridNode(Node):
                 y += sy
         return cells
 
-    # Convert an incoming keyframe scan to local robot base frame points and
-    # store it directly - each message here corresponds to exactly one
-    # pose-graph node, in the same order the node was created
     def keyframe_scan_callback(self, msg: LaserScan):
         points = []
         for i, r in enumerate(msg.ranges):
-            angle = msg.angle_min + i * msg.angle_increment
-            is_hit = msg.range_min <= r <= msg.range_max
+            is_hit = (msg.range_min <= r <= msg.range_max) and not math.isnan(r) and not math.isinf(r)
             r_used = r if is_hit else msg.range_max
 
+            angle = msg.angle_min + i * msg.angle_increment
             x_lidar = r_used * math.cos(angle)
             y_lidar = r_used * math.sin(angle)
-            x_base = -y_lidar - 0.040
-            y_base = x_lidar
+
+            x_base = -x_lidar - 0.040
+            y_base = -y_lidar
 
             points.append((x_base, y_base, is_hit))
 
         self.keyframes.append(points)
+        self.get_logger().info(f"Keyframe {len(self.keyframes)-1} received with {len(points)} points")
 
     def pose_graph_callback(self, msg: PoseArray):
         num_poses = len(msg.poses)
+        self.get_logger().info(f"Pose graph update: {num_poses} poses, {len(self.keyframes)} keyframes")
 
-        # Keyframes are appended 1:1 by keyframe_scan_callback as nodes are
-        # created. If a keyframe hasn't arrived yet, wait for the next
-        # PoseArray update rather than guessing its scan.
-        if len(self.keyframes) < num_poses:
+        if num_poses > len(self.keyframes):
+            self.get_logger().warning(f"Poses ({num_poses}) exceed keyframes ({len(self.keyframes)}), waiting...")
             return
 
-        # Reset log-odds matrix to unbake old positions
+        # Re-project keyframe scans using updated pose locations
         self.log_odds.fill(0.0)
-
-        # Re-project all keyframe scans using updated pose locations
-        for idx, pose_msg in enumerate(msg.poses):
-            if idx >= len(self.keyframes):
-                break
+        for idx in range(min(num_poses, len(self.keyframes))):
+            pose_msg = msg.poses[idx]
 
             px = pose_msg.position.x
             py = pose_msg.position.y
+            qx = pose_msg.orientation.x
+            qy = pose_msg.orientation.y
             qz = pose_msg.orientation.z
             qw = pose_msg.orientation.w
-            ptheta = 2.0 * math.atan2(qz, qw)
+
+            siny_cosp = 2.0 * (qw * qz + qx * qy)
+            cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+            ptheta = math.atan2(siny_cosp, cosy_cosp)
 
             sgx, sgy = self.world_to_grid(px, py)
             cos_t = math.cos(ptheta)
@@ -126,11 +127,16 @@ class OccupancyGridNode(Node):
                             self.log_odds[gy, gx] + self.l_free - self.l0, self.l_min, self.l_max
                         )
 
-                # Occupied endpoint
-                if is_hit and self.in_bounds(egx, egy):
-                    self.log_odds[egy, egx] = np.clip(
-                        self.log_odds[egy, egx] + self.l_occ - self.l0, self.l_min, self.l_max
-                    )
+                # Endpoint updating
+                if self.in_bounds(egx, egy):
+                    if is_hit:
+                        self.log_odds[egy, egx] = np.clip(
+                            self.log_odds[egy, egx] + self.l_occ - self.l0, self.l_min, self.l_max
+                        )
+                    else:
+                        self.log_odds[egy, egx] = np.clip(
+                            self.log_odds[egy, egx] + self.l_free - self.l0, self.l_min, self.l_max
+                        )
 
         self.publish_map()
 
@@ -145,13 +151,21 @@ class OccupancyGridNode(Node):
         grid_msg.info.origin.position.y = self.origin_y
         grid_msg.info.origin.orientation.w = 1.0
 
-        prob = 1.0 - 1.0 / (1.0 + np.exp(self.log_odds))
+        clamped_odds = np.clip(self.log_odds, -10, 10)
+        prob = 1.0 - 1.0 / (1.0 + np.exp(clamped_odds))
+
         data = np.full(self.log_odds.shape, -1, dtype=np.int8)
         known = self.log_odds != 0.0
-        data[known] = (prob[known] * 100).astype(np.int8)
+        data[known] = np.clip((prob[known] * 100.0).astype(np.int8), 0, 100)
 
         grid_msg.data = data.flatten().tolist()
         self.map_pub.publish(grid_msg)
+
+        num_occupied = np.sum(data > 50)
+        num_free = np.sum((data < 50) & (data >= 0))
+        num_unknown = np.sum(data == -1)
+        if num_occupied > 0 or num_free > 0:
+            self.get_logger().info(f"Map: {num_occupied} occupied, {num_free} free, {num_unknown} unknown cells")
 
 def main(args=None):
     rclpy.init(args=args)

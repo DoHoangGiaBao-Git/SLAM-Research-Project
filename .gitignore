@@ -1,4 +1,33 @@
-.vscode/
+# ROS 2 / colcon output
+build/
+install/
+log/
 **/__pycache__/
-*.pyc
+**/.pytest_cache/
+*.py[cod]
 
+# IDE and local settings
+**/.metadata/
+.vscode/
+.claude/
+
+# Python environments and credentials
+.venv*/
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# STM32 generated build output
+**/Debug/
+**/Release/
+*.o
+*.elf
+*.map
+*.list
+
+# Keep out unless you have permission and intend to publish them
+/Papers/
+/maker_space_dataset/

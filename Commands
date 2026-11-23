@@ -1,0 +1,23 @@
+Turtlebot4
+ros2 run pose_graph_slam_v2 pose_graph_slam_v2_node --ros-args -r __ns:=/robot# -r /odom:=/robot#/odom -r /scan:=/robot#/scan -r /tf:=/robot#/tf -r /tf_static:=/robot#/tf_static -r /imu:=/robot#/imu -p map_frame:=map -p odom_frame:=odom -p base_frame:=base_link -p do_save_trajectory_tum:=false -p use_sim_time:=false
+
+ros2 run pose_graph_slam_v2 occupancy_grid_map_v2_node --ros-args -r __ns:=/robot# -p map_frame:=map -p do_save_map_to_disk:=false -p use_sim_time:=false
+
+ros2 launch turtlebot4_viz view_robot.launch.py namespace:=/robot#
+
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r __ns:=/robot# -r /cmd_vel:=/robot#/cmd_vel -p stamped:=true
+
+Extract dataset (slam_toolbox)
+ros2 bag record /robot#/scan /robot#/odom /robot#/slam_toolbox/graph_visualization /robot#/tf /robot#/tf_static -o [bag_name]
+
+ros2 bag record /robot#/scan /robot#/odom /robot#/tf /robot#/tf_static /robot#/robot_description /robot#/joint_states /robot#/imu -o [bag_name]
+
+ros2 bag play [bag_name] --clock
+
+python3 extract_slam_graph.py --bag ./[slam_toolbox_bag] --output slam_path.txt --topic /robot#/slam_toolbox/graph_visualization
+
+python3 trajectory_evaluation.py --bag [bag_name] --topic /robot#/odom --gt [slam_toolbox_path].txt --slam_custom [custom_slam_path].txt
+
+
+
+

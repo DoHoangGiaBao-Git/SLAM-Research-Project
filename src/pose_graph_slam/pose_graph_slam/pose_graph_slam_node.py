@@ -5,19 +5,19 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point, TransformStamped, PoseArray, Pose as RosPose
-from tf2_ros import TransformBroadcaster
+from tf2_ros import TransformBroadcaster, Buffer, TransformListener
+from tf2_geometry_msgs import do_transform_point
+from geometry_msgs.msg import PointStamped
 import math
 import numpy as np
 
 # Pose data structure
 class Pose:
     def __init__(self, map_x, map_y, map_theta, odom_x, odom_y, odom_theta, scan_msg):
-        # Optimized pose in map frame
         self.x = map_x
         self.y = map_y
         self.theta = map_theta
 
-        # Raw pose in odom frame
         self.odom_x = odom_x
         self.odom_y = odom_y
         self.odom_theta = odom_theta
@@ -40,29 +40,38 @@ class PoseGraphSLAMNode(Node):
 
         # === Parameters ===
         self.min_dist = 0.5            # Minimum distance to save a pose
-        self.min_angle = 0.785          # Minimum angle to save a pose
+        self.min_angle = 0.785         # Minimum angle to save a pose
 
         self.poses = []                 # List of Poses (Nodes)
         self.constraints = []           # List of Constraints (Edges)
 
-        self.current_scan = None        # Store points for extraction
-        self.min_poses = 15             # Minimum number of poses before checking loop closure
-        self.icp_threshold = 1.5        # Max distance between nodes for ICP
-        self.icp_fitness_threshold = 0.1 # Max mean residual to trust ICP
-        self.icp_max_correspondence_dist = 0.3 # Max distance to consider correspondence
+        self.current_scan = None        # Store points for extraction (in base_link frame)
+        self.latest_scan_msg = None     # Store raw message for keyframe publishing
+        self.min_poses = 8              # Check loop closure after 8 poses
+        self.min_loop_travel = 1.0      # Need 1m travel between loop attempts
+        self.icp_threshold = 4.0        # Candidate search radius in meters
+        self.icp_fitness_threshold = 0.15 # Max mean inlier distance in meters
+        self.icp_max_correspondence_dist = 0.3 # Correspondence distance
+        self.last_loop_closure_id = -1
+
+        # === TF Buffer & Listener ===
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # === TF Broadcaster & Publishers ===
         self.tf_broadcaster = TransformBroadcaster(self)
         self.marker_pub = self.create_publisher(MarkerArray, '/pose_graph_markers', 10)
         self.pose_array_pub = self.create_publisher(PoseArray, '/pose_graph_nodes', 10)
+        self.keyframe_scan_pub = self.create_publisher(LaserScan, '/keyframe_scan', 10)
 
         # === Subscriptions ===
         self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
 
-        self.get_logger().info("Pose Graph SLAM Node active with corrected frame math.")
+        # Continuous 10 Hz timer to publish map->odom TF
+        self.tf_timer = self.create_timer(0.1, self.publish_map_to_odom_tf)
 
-    # Publish updated graph node poses for occupancy grid reconstruction
+        self.get_logger().info("Pose Graph SLAM Node active with robust loop closure detection.")
 
     def publish_pose_array(self):
         msg = PoseArray()
@@ -77,12 +86,11 @@ class PoseGraphSLAMNode(Node):
             msg.poses.append(pose)
         self.pose_array_pub.publish(msg)
 
-    # ICP algorithm for point cloud matching
-    def icp(self, source_pts, target_pts, max_iterations=20, init_guess=(0.0, 0.0, 0.0)):
+    def icp(self, source_pts, target_pts, max_iterations=25, init_guess=(0.0, 0.0, 0.0)):
         src = np.array(source_pts)
         tgt = np.array(target_pts)
 
-        if len(src) == 0 or len(tgt) == 0:
+        if len(src) < 15 or len(tgt) < 15:
             return 0.0, 0.0, 0.0, float('inf')
 
         init_dx, init_dy, init_dtheta = init_guess
@@ -99,7 +107,8 @@ class PoseGraphSLAMNode(Node):
             matched_tgt = tgt[nn_idx]
 
             inliers = nn_dist <= self.icp_max_correspondence_dist
-            if np.count_nonzero(inliers) < 3:
+            num_inliers = np.count_nonzero(inliers)
+            if num_inliers < 10:
                 break
 
             centroid_src = np.mean(src[inliers], axis=0)
@@ -129,11 +138,14 @@ class PoseGraphSLAMNode(Node):
         diffs = src[:, None, :] - tgt[None, :, :]
         final_dists = np.min(np.linalg.norm(diffs, axis=2), axis=1)
         inlier_dists = final_dists[final_dists <= self.icp_max_correspondence_dist]
-        fitness = float(np.mean(inlier_dists)) if len(inlier_dists) >= 3 else float('inf')
+        
+        if len(inlier_dists) < 20:
+            fitness = float('inf')
+        else:
+            fitness = float(np.mean(inlier_dists))
 
         return dx, dy, dtheta, fitness
 
-    # Gauss-Newton Least Square Optimization
     def graph_optimization(self, iterations=10):
         num_nodes = len(self.poses)
         if num_nodes < 2 or not self.constraints:
@@ -199,7 +211,6 @@ class PoseGraphSLAMNode(Node):
         self.publish_map_to_odom_tf()
         self.publish_pose_array()
 
-    # Check loop closure of robot
     def check_loop_closure(self):
         if len(self.poses) < self.min_poses:
             return
@@ -207,36 +218,64 @@ class PoseGraphSLAMNode(Node):
         current_id = len(self.poses) - 1
         current_node = self.poses[current_id]
 
+        if self.last_loop_closure_id >= 0:
+            dist_since_last = math.hypot(
+                current_node.x - self.poses[self.last_loop_closure_id].x,
+                current_node.y - self.poses[self.last_loop_closure_id].y
+            )
+            if dist_since_last < self.min_loop_travel:
+                return
+
+        best_candidate = None
+        best_fitness = float('inf')
+        best_transform = None
+
         for candidate_id in range(current_id - self.min_poses):
             candidate_node = self.poses[candidate_id]
-
             dist = math.hypot(current_node.x - candidate_node.x, current_node.y - candidate_node.y)
 
-            if dist <= self.icp_threshold:
-                cos_c = math.cos(candidate_node.theta)
-                sin_c = math.sin(candidate_node.theta)
-                dx_global = current_node.x - candidate_node.x
-                dy_global = current_node.y - candidate_node.y
-                init_dx = cos_c * dx_global + sin_c * dy_global
-                init_dy = -sin_c * dx_global + cos_c * dy_global
-                init_dtheta = math.atan2(math.sin(current_node.theta - candidate_node.theta),
-                                         math.cos(current_node.theta - candidate_node.theta))
+            if dist > self.icp_threshold:
+                continue
 
-                dx, dy, dtheta, fitness = self.icp(
-                    current_node.scan, candidate_node.scan, init_guess=(init_dx, init_dy, init_dtheta)
-                )
+            if self.last_loop_closure_id >= 0 and abs(candidate_id - self.last_loop_closure_id) < 5:
+                continue
 
-                if fitness > self.icp_fitness_threshold:
-                    continue
+            cos_c = math.cos(candidate_node.theta)
+            sin_c = math.sin(candidate_node.theta)
+            dx_global = current_node.x - candidate_node.x
+            dy_global = current_node.y - candidate_node.y
+            init_dx = cos_c * dx_global + sin_c * dy_global
+            init_dy = -sin_c * dx_global + cos_c * dy_global
+            init_dtheta = math.atan2(math.sin(current_node.theta - candidate_node.theta),
+                                     math.cos(current_node.theta - candidate_node.theta))
 
-                virtual_edge = Constraints(candidate_id, current_id, dx, dy, dtheta, is_loop=True)
-                self.constraints.append(virtual_edge)
-                self.get_logger().info(f"LOOP CLOSURE DETECTED: Node {candidate_id} <-> Node {current_id}")
+            dx, dy, dtheta, fitness = self.icp(
+                current_node.scan, candidate_node.scan, init_guess=(init_dx, init_dy, init_dtheta)
+            )
 
-                self.graph_optimization()
-                break
+            if fitness > self.icp_fitness_threshold:
+                continue
 
-    # Publish map frame
+            # Validate that ICP correction from initial guess is bounded
+            corr_dist = math.hypot(dx - init_dx, dy - init_dy)
+            corr_dtheta = abs(math.atan2(math.sin(dtheta - init_dtheta), math.cos(dtheta - init_dtheta)))
+
+            if corr_dist < 1.0 and corr_dtheta < 0.6:
+                if fitness < best_fitness:
+                    best_fitness = fitness
+                    best_candidate = candidate_id
+                    best_transform = (dx, dy, dtheta)
+
+        if best_candidate is not None:
+            dx, dy, dtheta = best_transform
+            virtual_edge = Constraints(best_candidate, current_id, dx, dy, dtheta, is_loop=True)
+            self.constraints.append(virtual_edge)
+            self.last_loop_closure_id = current_id
+            self.get_logger().info(
+                f"LOOP CLOSURE DETECTED: Node {best_candidate} <-> Node {current_id} (fitness={best_fitness:.4f})"
+            )
+            self.graph_optimization()
+
     def publish_map_to_odom_tf(self):
         if not self.poses:
             return
@@ -267,7 +306,6 @@ class PoseGraphSLAMNode(Node):
 
         self.tf_broadcaster.sendTransform(t)
 
-    # Visualize poses and path on Rviz2
     def publish_visualizations(self):
         marker_array = MarkerArray()
 
@@ -325,23 +363,49 @@ class PoseGraphSLAMNode(Node):
         marker_array.markers.append(loop_marker)
         self.marker_pub.publish(marker_array)
 
-    # Get LiDAR data
     def scan_callback(self, msg: LaserScan):
+        self.latest_scan_msg = msg
         points = []
+
+        # Transform laser scan points from laser frame to base_link frame using TF
+        # This ensures correct frame transformation regardless of URDF configuration
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'base_link',  # target frame
+                msg.header.frame_id,  # source frame (laser)
+                msg.header.stamp,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+        except Exception as e:
+            self.get_logger().warn(f'TF lookup failed for scan: {e}')
+            return
+
         for i, r in enumerate(msg.ranges):
-            if r < msg.range_min or r > msg.range_max:
+            if r < msg.range_min or r > msg.range_max or math.isnan(r) or math.isinf(r):
                 continue
             angle = msg.angle_min + (i * msg.angle_increment)
             x_lidar = r * math.cos(angle)
             y_lidar = r * math.sin(angle)
-            x_base = -y_lidar - 0.040
-            y_base = x_lidar
-            points.append((x_base, y_base))
+
+            # Create point in laser frame
+            point_laser = PointStamped()
+            point_laser.header = msg.header
+            point_laser.point.x = x_lidar
+            point_laser.point.y = y_lidar
+            point_laser.point.z = 0.0
+
+            # Transform to base_link frame
+            try:
+                point_base = self.tf_buffer.transform(point_laser, 'base_link', timeout=rclpy.duration.Duration(seconds=0.05))
+                points.append((point_base.point.x, point_base.point.y))
+            except Exception as e:
+                self.get_logger().debug(f'Point transform failed: {e}')
+                continue
+
         self.current_scan = points
 
-    # Get Odometry data and calculate Odometry constraints
     def odom_callback(self, msg: Odometry):
-        if self.current_scan is None:
+        if self.current_scan is None or self.latest_scan_msg is None:
             return
 
         x = msg.pose.pose.position.x
@@ -349,10 +413,10 @@ class PoseGraphSLAMNode(Node):
         q = msg.pose.pose.orientation
         theta = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
-        # First Node
         if not self.poses:
             first_node = Pose(x, y, theta, x, y, theta, self.current_scan)
             self.poses.append(first_node)
+            self.keyframe_scan_pub.publish(self.latest_scan_msg)
             self.get_logger().info(f"Node 0 initialized | x={x:.3f}, y={y:.3f}")
             self.publish_map_to_odom_tf()
             self.publish_pose_array()
@@ -360,20 +424,17 @@ class PoseGraphSLAMNode(Node):
 
         last_node = self.poses[-1]
 
-        # Calculate odometry deltas in raw odom frame
         global_dx = x - last_node.odom_x
         global_dy = y - last_node.odom_y
         dtheta = math.atan2(math.sin(theta - last_node.odom_theta), math.cos(theta - last_node.odom_theta))
         dist = math.hypot(global_dx, global_dy)
 
         if dist >= self.min_dist or abs(dtheta) >= self.min_angle:
-            # Convert global odom step to local robot frame using last_node.odom_theta
             cos_odom = math.cos(last_node.odom_theta)
             sin_odom = math.sin(last_node.odom_theta)
             local_dx = cos_odom * global_dx + sin_odom * global_dy
             local_dy = -sin_odom * global_dx + cos_odom * global_dy
 
-            # Project new node map pose chaining from last_node's optimized map pose
             cos_map = math.cos(last_node.theta)
             sin_map = math.sin(last_node.theta)
             map_x = last_node.x + (cos_map * local_dx - sin_map * local_dy)
@@ -382,6 +443,7 @@ class PoseGraphSLAMNode(Node):
 
             new_node = Pose(map_x, map_y, map_theta, x, y, theta, self.current_scan)
             self.poses.append(new_node)
+            self.keyframe_scan_pub.publish(self.latest_scan_msg)
 
             from_id = len(self.poses) - 2
             to_id = len(self.poses) - 1

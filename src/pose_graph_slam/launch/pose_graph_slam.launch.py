@@ -7,7 +7,6 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-
 def generate_launch_description():
     # Package name
     package_name = 'pose_graph_slam'
@@ -15,28 +14,8 @@ def generate_launch_description():
     pkg_share = get_package_share_directory(package_name)
     rviz_config_path = os.path.join(pkg_share, 'rviz2', 'config.rviz')
 
-    # Argument to toggle between Simulation and Real Robot
-    use_sim_arg = DeclareLaunchArgument(
-        'use_sim',
-        default_value='true',
-        description='Set to "true" for Gazebo simulation, or "false" for real robot.'
-    )
-    use_sim = LaunchConfiguration('use_sim')
-
-    # Gazebo simulation bring up
-    gz_bringup_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('turtlebot4_gz_bringup'),
-                'launch',
-                'turtlebot4_gz.launch.py'
-            )
-        ),
-        condition=IfCondition(use_sim)
-    )
-
     # Set use_sim_time for all nodes
-    node_params = [{'use_sim_time': use_sim}]
+    node_params = [{'use_sim_time': False}]
 
     # Run Pose Graph SLAM
     pose_graph_slam_node = Node(
@@ -67,8 +46,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        use_sim_arg,
-        gz_bringup_launch,
         pose_graph_slam_node,
         occupancy_grid_map_node,
         rviz_node,
